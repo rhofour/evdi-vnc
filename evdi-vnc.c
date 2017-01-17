@@ -13,6 +13,9 @@
 #define SCREEN_WIDTH 1280
 // Screen height
 #define SCREEN_HEIGHT 720
+// Hardcode an EDID from the Google Autotest project:
+// https://chromium.googlesource.com/chromiumos/third_party/autotest/+/master/server/site_tests/display_Resolution/test_data/edids
+static const char EDID[] = "f0ddf85ec47228bd9d3ea17a8932e07b841ce6db";
 
 /* Count the number of cardX files in /sys/class/drm. */
 int countCardEntries() {
@@ -84,7 +87,8 @@ evdi_handle connectToEvdiNode() {
 
 int main(int argc, char *argv[]) {
   // Setup EVDI
-  if (connectToEvdiNode() == EVDI_INVALID_HANDLE) {
+  evdi_handle evdiNode = connectToEvdiNode();
+  if (evdiNode == EVDI_INVALID_HANDLE) {
     fprintf(stderr, "Failed to connect to an EVDI node.\n");
     return(1);
   }
@@ -92,5 +96,8 @@ int main(int argc, char *argv[]) {
   rfbScreenInfoPtr screen = rfbGetScreen(&argc, argv, SCREEN_WIDTH, SCREEN_HEIGHT, 8, 3, BPP);
   screen->frameBuffer = (char*) malloc(SCREEN_WIDTH * SCREEN_HEIGHT * BPP);
   rfbInitServer(screen);
+
+  // Clean up
+  evdi_close(evdiNode);
   return(0);
 }
