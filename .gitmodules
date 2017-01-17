@@ -1,0 +1,3 @@
+[submodule "evdi"]
+	path = evdi
+	url = https://github.com/DisplayLink/evdi
