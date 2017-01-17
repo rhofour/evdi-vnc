@@ -1,5 +1,8 @@
+#include <dirent.h>
 #include <stdbool.h>
 #include <stdio.h>
+
+#include <regex.h>
 
 #include <evdi_lib.h>
 #include <rfb/rfb.h>
@@ -11,20 +14,44 @@
 // Screen height
 #define SCREEN_HEIGHT 720
 
+/* Count the number of cardX files in /sys/class/drm. */
+int countCardEntries() {
+  // Prepare regex to match cardX.
+  regex_t regex;
+  if (regcomp(&regex, "^card[0-9]*$", REG_NOSUB)) {
+    fprintf(stderr, "Could not compile card regex.\n");
+    return 0;
+  }
+
+  // Scan through /sys/class/drm
+  int entries = 0;
+  DIR *dir = opendir("/sys/class/drm");
+  if (dir != NULL) {
+    struct dirent *dirEntry;
+    while (dirEntry = readdir(dir)) {
+      if (regexec(&regex, dirEntry->d_name, 0, NULL, 0) == 0) {
+        entries++;
+      }
+    }
+  } else {
+    fprintf(stderr, "Could not open /sys/class/drm\n");
+  }
+  return(entries);
+}
 /* Scan through potential EVDI devices until either one is available or we've probed all devices.
  * Return the index of the first available device or -1 if none is found.
  */
 int findAvailableEvdiNode() {
   evdi_device_status status = UNRECOGNIZED;
   int i;
-  for (i = 0; status == UNRECOGNIZED; i++) {
+  int nCards = countCardEntries();
+  for (i = 0; i < nCards; i++) {
     status = evdi_check_device(i);
+    if (status == AVAILABLE) {
+      return(i);
+    }
   }
-  if (status == AVAILABLE) {
-    return(i);
-  } else {
-    return(-1);
-  }
+  return(-1);
 }
 /* Search and connect to the first available EVDI node.
  * If none exists create one and connect to it.
