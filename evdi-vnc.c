@@ -8,7 +8,7 @@
 #include <rfb/rfb.h>
 
 // Bytes per pixel
-#define BPP 1
+#define BPP 4
 // Screen width
 #define SCREEN_WIDTH 1280
 // Screen height
@@ -58,7 +58,7 @@ int findAvailableEvdiNode() {
 }
 /* Search and connect to the first available EVDI node.
  * If none exists create one and connect to it.
- * Returns an an evdi_handle if successful and EVDI_INVALID_HANDLE if not.
+ * Returns an evdi_handle if successful and EVDI_INVALID_HANDLE if not.
  */
 evdi_handle connectToEvdiNode() {
   // First, find an available node
@@ -85,6 +85,22 @@ evdi_handle connectToEvdiNode() {
   return nodeHandle;
 }
 
+/* Do initial VNC setup and start the server. 
+ * Returns the rfbScreenInfoPtr created.
+ */
+rfbScreenInfoPtr startVncServer(int argc, char *argv[]) {
+  rfbScreenInfoPtr screen = rfbGetScreen(&argc, argv, SCREEN_WIDTH, SCREEN_HEIGHT, 8, 3, BPP);
+  if (screen == 0) {
+    fprintf(stderr, "Error getting RFB screen.\n");
+    return(screen);
+  }
+  screen->frameBuffer = (char*) malloc(SCREEN_WIDTH * SCREEN_HEIGHT * BPP);
+  // Set the inital FB to all white.
+  memset(screen->frameBuffer, 0xff, SCREEN_WIDTH * SCREEN_HEIGHT * BPP);
+  rfbInitServer(screen);
+  return(screen);
+}
+
 int main(int argc, char *argv[]) {
   // Setup EVDI
   evdi_handle evdiNode = connectToEvdiNode();
@@ -93,9 +109,11 @@ int main(int argc, char *argv[]) {
     return(1);
   }
   // Start up VNC server
-  rfbScreenInfoPtr screen = rfbGetScreen(&argc, argv, SCREEN_WIDTH, SCREEN_HEIGHT, 8, 3, BPP);
-  screen->frameBuffer = (char*) malloc(SCREEN_WIDTH * SCREEN_HEIGHT * BPP);
-  rfbInitServer(screen);
+  rfbScreenInfoPtr screen = startVncServer(argc, argv);
+  if (screen == 0) {
+    fprintf(stderr, "Failed to start VNC server.\n");
+    return(1);
+  }
 
   // Clean up
   evdi_close(evdiNode);
