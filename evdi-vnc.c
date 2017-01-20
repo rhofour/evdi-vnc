@@ -43,12 +43,16 @@ static const unsigned const char EDID[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x39
 };
+#define N_BUFFERS 1
 
 // *** Globals ***
 
 int connectedClients = 0;
 evdi_handle evdiNode;
 rfbScreenInfoPtr screen;
+bool buffersAllocated = false;
+int nextBuffer = 0;
+evdi_buffer buffers[N_BUFFERS];
 
 // *** EVDI Hooks ***
 
@@ -57,8 +61,25 @@ void dpmsHandler(int dpmsMode, void *userData) {
 }
 
 void modeChangedHandler(evdi_mode mode, void *userData) {
-  fprintf(stdout, "TODO: Handle EVDI mode changes\n");
   fprintf(stdout, "Mode changed to %dx%d @ %dHz\n", mode.width, mode.height, mode.refresh_rate);
+
+  // Unregister old buffers if necessary
+  if (buffersAllocated) {
+    for (int i = 0; i < N_BUFFERS; i++) {
+      free(buffers[i].buffer);
+      evdi_unregister_buffer(evdiNode, buffers[i].id);
+    }
+  }
+  // Register new buffers for this mode
+  for (int i = 0; i < N_BUFFERS; i++) {
+    buffers[i].id = i;
+    buffers[i].width = mode.width;
+    buffers[i].height = mode.height;
+    buffers[i].stride = mode.bits_per_pixel/8 * mode.width;
+    buffers[i].buffer = malloc(buffers[i].height * buffers[i].stride);
+    evdi_register_buffer(evdiNode, buffers[i]);
+  }
+  buffersAllocated = true;
 }
 
 void updateReadyHandler(int bufferId, void *userData) {
