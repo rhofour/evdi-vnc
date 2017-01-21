@@ -11,16 +11,10 @@
 
 // *** Constants ***
 
-// Bytes per pixel
-#define BPP 4
-// Screen width
-#define SCREEN_WIDTH 1280
-// Screen height
-#define SCREEN_HEIGHT 720
 // Hardcode an EDID from the Google Autotest project:
 // https://chromium.googlesource.com/chromiumos/third_party/autotest/+/master/server/site_tests/display_Resolution/test_data/edids
 // Dumped with xxd --include
-static const unsigned const char EDID[] = {
+static const unsigned char EDID[] = {
   0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x4e, 0x84, 0x5d, 0x00,
   0x01, 0x00, 0x00, 0x00, 0x01, 0x15, 0x01, 0x03, 0x80, 0x31, 0x1c, 0x78,
   0x2a, 0x0d, 0xc9, 0xa0, 0x57, 0x47, 0x98, 0x27, 0x12, 0x48, 0x4c, 0x20,
@@ -65,6 +59,54 @@ void handleSignal(int signal) {
   }
 }
 
+// *** VNC Hooks ***
+static void clientGone(rfbClientPtr cl)
+{
+  cl->clientData = NULL;
+  connectedClients--;
+}
+
+static enum rfbNewClientAction newClient(rfbClientPtr client)
+{
+  client->clientGoneHook = clientGone;
+  connectedClients++;
+  return RFB_CLIENT_ACCEPT;
+}
+
+
+// *** Other VNC functions ***
+
+/* Register a VNC frame buffer sized for the current mode
+ */
+char * allocateVncFramebuffer(rfbScreenInfoPtr screen) {
+  int fbSize = currentMode.width * currentMode.height * currentMode.bits_per_pixel/8;
+  char *fb = (char*) malloc(fbSize);
+  // Set the inital FB to all white.
+  memset(fb, 0xff, fbSize);
+  return fb;
+}
+
+/* Do initial VNC setup and start the server. 
+ * Returns the rfbScreenInfoPtr created.
+ */
+rfbScreenInfoPtr startVncServer(int argc, char *argv[]) {
+  rfbScreenInfoPtr screen = rfbGetScreen(&argc, argv, currentMode.width,
+      currentMode.height, 8, 3, currentMode.bits_per_pixel/8);
+  if (screen == 0) {
+    fprintf(stderr, "Error getting RFB screen.\n");
+    return screen;
+  }
+  screen->newClientHook = newClient;
+  screen->frameBuffer = allocateVncFramebuffer(screen);
+  rfbInitServer(screen);
+  return screen;
+}
+
+void cleanUpVncServer(rfbScreenInfoPtr screen) {
+  free(screen->frameBuffer);
+  rfbScreenCleanup(screen);
+}
+
 // *** EVDI Hooks ***
 
 void dpmsHandler(int dpmsMode, void *userData) {
@@ -75,14 +117,14 @@ void modeChangedHandler(evdi_mode mode, void *userData) {
   fprintf(stdout, "Mode changed to %dx%d @ %dHz\n", mode.width, mode.height, mode.refresh_rate);
   currentMode = mode;
 
-  // Unregister old buffers if necessary
+  // Unregister old EVDI buffers if necessary
   if (buffersAllocated) {
     for (int i = 0; i < N_BUFFERS; i++) {
       free(buffers[i].buffer);
       evdi_unregister_buffer(evdiNode, buffers[i].id);
     }
   }
-  // Register new buffers for this mode
+  // Register new EVDI buffers for this mode
   for (int i = 0; i < N_BUFFERS; i++) {
     buffers[i].id = i;
     buffers[i].width = mode.width;
@@ -92,6 +134,17 @@ void modeChangedHandler(evdi_mode mode, void *userData) {
     evdi_register_buffer(evdiNode, buffers[i]);
   }
   buffersAllocated = true;
+
+  // Register new VNC framebuffer
+  if (screen == 0) return; // Exit early if VNC hasn't been started yet
+  char *oldFb = screen->frameBuffer;
+  char *newFb = allocateVncFramebuffer(screen);
+  rfbNewFramebuffer(screen, newFb, currentMode.width, currentMode.height, 8, 3,
+      currentMode.bits_per_pixel/8);
+  // Unregister old VNC framebuffer if necessary
+  if (oldFb) {
+    free(oldFb);
+  }
 }
 
 void updateReadyHandler(int bufferId, void *userData) {
@@ -165,7 +218,7 @@ evdi_handle openEvdiNode() {
     }
   }
 
-  // Next, connect to the node we found
+  // Next, open the node we found
   evdi_handle nodeHandle = evdi_open(nodeIndex);
   if (nodeHandle == EVDI_INVALID_HANDLE) {
     fprintf(stderr, "Failed to open EVDI node: %d\n", nodeIndex);
@@ -187,57 +240,9 @@ void disconnectFromEvdiNode(evdi_handle nodeHandle) {
   fprintf(stdout, "Disconnected from EVDI node.\n");
 }
 
-// *** VNC Hooks ***
-static void clientGone(rfbClientPtr cl)
-{
-  cl->clientData = NULL;
-  connectedClients--;
-  if (connectedClients == 0) {
-    disconnectFromEvdiNode(evdiNode);
-  }
-}
-
-static enum rfbNewClientAction newClient(rfbClientPtr client)
-{
-  if (connectedClients == 0) {
-    connectToEvdiNode(evdiNode);
-  }
-  client->clientGoneHook = clientGone;
-  connectedClients++;
-  return RFB_CLIENT_ACCEPT;
-}
-
-
-// *** Other VNC functions ***
-
-/* Do initial VNC setup and start the server. 
- * Returns the rfbScreenInfoPtr created.
- */
-rfbScreenInfoPtr startVncServer(int argc, char *argv[]) {
-  rfbScreenInfoPtr screen = rfbGetScreen(&argc, argv, SCREEN_WIDTH, SCREEN_HEIGHT, 8, 3, BPP);
-  if (screen == 0) {
-    fprintf(stderr, "Error getting RFB screen.\n");
-    return screen;
-  }
-  screen->frameBuffer = (char*) malloc(SCREEN_WIDTH * SCREEN_HEIGHT * BPP);
-  screen->newClientHook = newClient;
-  // Set the inital FB to all white.
-  memset(screen->frameBuffer, 0xff, SCREEN_WIDTH * SCREEN_HEIGHT * BPP);
-  rfbInitServer(screen);
-  return screen;
-}
-
-void cleanUpVncServer(rfbScreenInfoPtr screen) {
-  free(screen->frameBuffer);
-  rfbScreenCleanup(screen);
-}
-
+// *** Main ***
 
 int main(int argc, char *argv[]) {
-  // Catch Ctrl-C (SIGINT)
-  struct sigaction sa;
-  sa.sa_handler = handleSignal;
-  sigaction(SIGINT, &sa, NULL);
 
   // Setup EVDI
   evdiNode = openEvdiNode();
@@ -254,6 +259,15 @@ int main(int argc, char *argv[]) {
   evdiCtx.mode_changed_handler = modeChangedHandler;
   evdiCtx.update_ready_handler = updateReadyHandler;
   evdiCtx.crtc_state_handler = crtcStateHandler;
+  
+  // Connect to evdiNode and wait for mode to update
+  connectToEvdiNode(evdiNode);
+  while (currentMode.width == 0) {
+    if (poll(pollfds, 1, -1)) {
+      // Figure out which update we received
+      evdi_handle_events(evdiNode, &evdiCtx);
+    }
+  }
 
   // Start up VNC server
   screen = startVncServer(argc, argv);
@@ -261,6 +275,11 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Failed to start VNC server.\n");
     return 1;
   }
+
+  // Catch Ctrl-C (SIGINT)
+  struct sigaction sa;
+  sa.sa_handler = handleSignal;
+  sigaction(SIGINT, &sa, NULL);
 
   // Run event loop
   fprintf(stdout, "Starting event loop.\n");
@@ -277,6 +296,7 @@ int main(int argc, char *argv[]) {
   // Clean up
   fprintf(stdout, "Cleaning up...\n");
   cleanUpVncServer(screen);
+  disconnectFromEvdiNode(evdiNode);
   evdi_close(evdiNode);
 
   return 0;
