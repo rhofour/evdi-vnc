@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 
@@ -48,11 +49,21 @@ static const unsigned const char EDID[] = {
 // *** Globals ***
 
 int connectedClients = 0;
-evdi_handle evdiNode;
 rfbScreenInfoPtr screen;
+
+evdi_handle evdiNode;
 bool buffersAllocated = false;
 int nextBuffer = 0;
 evdi_buffer buffers[N_BUFFERS];
+evdi_mode currentMode;
+
+// *** Signal Handler ***
+void handleSignal(int signal) {
+  if (signal == SIGINT) {
+    fprintf(stdout, "Shutting down VNC server.\n");
+    rfbShutdownServer(screen, true);
+  }
+}
 
 // *** EVDI Hooks ***
 
@@ -62,6 +73,7 @@ void dpmsHandler(int dpmsMode, void *userData) {
 
 void modeChangedHandler(evdi_mode mode, void *userData) {
   fprintf(stdout, "Mode changed to %dx%d @ %dHz\n", mode.width, mode.height, mode.refresh_rate);
+  currentMode = mode;
 
   // Unregister old buffers if necessary
   if (buffersAllocated) {
@@ -222,6 +234,11 @@ void cleanUpVncServer(rfbScreenInfoPtr screen) {
 
 
 int main(int argc, char *argv[]) {
+  // Catch Ctrl-C (SIGINT)
+  struct sigaction sa;
+  sa.sa_handler = handleSignal;
+  sigaction(SIGINT, &sa, NULL);
+
   // Setup EVDI
   evdiNode = openEvdiNode();
   if (evdiNode == EVDI_INVALID_HANDLE) {
