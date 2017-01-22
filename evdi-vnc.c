@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <unistd.h>
 
 #include <regex.h>
 
@@ -39,6 +40,8 @@ static const unsigned char EDID[] = {
   0x00, 0x00, 0x00, 0x39
 };
 #define N_BUFFERS 1
+// Currently the EVDI library won't update more than 16 rects at a time
+#define MAX_RECTS 16
 
 // *** Globals ***
 
@@ -50,6 +53,7 @@ bool buffersAllocated = false;
 int nextBuffer = 0;
 evdi_buffer buffers[N_BUFFERS];
 evdi_mode currentMode;
+evdi_rect rects[MAX_RECTS];
 
 // *** Signal Handler ***
 void handleSignal(int signal) {
@@ -115,6 +119,11 @@ void dpmsHandler(int dpmsMode, void *userData) {
 
 void modeChangedHandler(evdi_mode mode, void *userData) {
   fprintf(stdout, "Mode changed to %dx%d @ %dHz\n", mode.width, mode.height, mode.refresh_rate);
+  if (mode.bits_per_pixel != 32) {
+    fprintf(stderr, "evdi-vnc requires modes with 32 bits per pixel. Instead received %d bpp.",
+        mode.bits_per_pixel);
+    exit(1);
+  }
   currentMode = mode;
 
   // Unregister old EVDI buffers if necessary
@@ -148,8 +157,18 @@ void modeChangedHandler(evdi_mode mode, void *userData) {
 }
 
 void updateReadyHandler(int bufferId, void *userData) {
-  fprintf(stdout, "TODO: Handle EVDI updates\n");
-  fprintf(stdout, "Got update on buffer %d\n", bufferId);
+  int nRects;
+  evdi_grab_pixels(evdiNode, rects, &nRects);
+
+  // Actually copy the data from one buffer to another
+  for (int i = 0; i < nRects; i++) {
+    for (int y = rects[i].y1; y <= rects[i].y2; y++) {
+      int start = buffers[bufferId].stride * y + 4 * rects[i].x1;
+      memcpy(&screen->frameBuffer[start], &buffers[bufferId].buffer[start],
+          4 * (rects[i].x2 - rects[i].x1));
+      rfbMarkRectAsModified(screen, rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
+    }
+  }
 }
 
 void crtcStateHandler(int state, void *userData) {
@@ -284,6 +303,11 @@ int main(int argc, char *argv[]) {
   // Run event loop
   fprintf(stdout, "Starting event loop.\n");
   while (rfbIsActive(screen)) {
+    // Request an update
+    if (evdi_request_update(evdiNode, buffers[nextBuffer].id)) {
+      updateReadyHandler(buffers[nextBuffer].id, NULL);
+    }
+    nextBuffer = nextBuffer + 1 % N_BUFFERS;
     // Poll for EVDI updates for 1.0ms
     if (poll(pollfds, 1, 1)) {
       // Figure out which update we received
