@@ -284,13 +284,14 @@ int main(int argc, char *argv[]) {
   // Run event loop
   fprintf(stdout, "Starting event loop.\n");
   while (rfbIsActive(screen)) {
-    // Check for VNC events for 1.0ms
-    rfbProcessEvents(screen, 1000);
     // Poll for EVDI updates for 1.0ms
     if (poll(pollfds, 1, 1)) {
       // Figure out which update we received
       evdi_handle_events(evdiNode, &evdiCtx);
     }
+    // Check for VNC events for remaining time to match refresh rate
+    int timeoutMicros = (1e6 / currentMode.refresh_rate) - 1000;
+    rfbProcessEvents(screen, timeoutMicros);
   }
 
   // Clean up
