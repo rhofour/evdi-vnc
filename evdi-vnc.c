@@ -301,6 +301,8 @@ int main(int argc, char *argv[]) {
   // Catch Ctrl-C (SIGINT)
   struct sigaction sa;
   sa.sa_handler = handleSignal;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = 0;
   sigaction(SIGINT, &sa, NULL);
 
   // Run event loop
