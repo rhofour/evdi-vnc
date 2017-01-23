@@ -80,6 +80,17 @@ static enum rfbNewClientAction newClient(rfbClientPtr client)
 
 // *** Other VNC functions ***
 
+/* Adjust the pixel format to match the EVDI buffer.
+ */
+void adjustPixelFormat(rfbScreenInfoPtr screen) {
+  // TODO: properly communicate between Linux DRM buffer formats and
+  // libvncserver
+  rfbPixelFormat *format = &screen->serverFormat;
+  format->redShift = 16;
+  format->blueShift = 0;
+  fprintf(stdout, "Pixel format adjusted.\n");
+}
+
 /* Register a VNC frame buffer sized for the current mode
  */
 char * allocateVncFramebuffer(rfbScreenInfoPtr screen) {
@@ -100,6 +111,12 @@ rfbScreenInfoPtr startVncServer(int argc, char *argv[]) {
     fprintf(stderr, "Error getting RFB screen.\n");
     return screen;
   }
+  adjustPixelFormat(screen);
+  rfbPixelFormat *format = &screen->serverFormat;
+  fprintf(stdout,
+      "Pixel format:\nShift:\tR: %d G: %d B: %d\nMax:\tR: %d G: %d B: %d\n",
+      format->redShift, format->greenShift, format->blueShift,
+      format->redMax, format->greenMax, format->blueMax);
   screen->newClientHook = newClient;
   screen->frameBuffer = allocateVncFramebuffer(screen);
   rfbInitServer(screen);
@@ -120,6 +137,8 @@ void dpmsHandler(int dpmsMode, void *userData) {
 void modeChangedHandler(evdi_mode mode, void *userData) {
   fprintf(stdout, "Mode changed to %dx%d @ %dHz\n", mode.width, mode.height, mode.refresh_rate);
   if (mode.bits_per_pixel != 32) {
+    // TODO: properly communicate between Linux DRM buffer formats and
+    // libvncserver
     fprintf(stderr, "evdi-vnc requires modes with 32 bits per pixel. Instead received %d bpp.",
         mode.bits_per_pixel);
     exit(1);
@@ -150,6 +169,8 @@ void modeChangedHandler(evdi_mode mode, void *userData) {
   char *newFb = allocateVncFramebuffer(screen);
   rfbNewFramebuffer(screen, newFb, currentMode.width, currentMode.height, 8, 3,
       currentMode.bits_per_pixel/8);
+  // Update pixel format
+  adjustPixelFormat(screen);
   // Unregister old VNC framebuffer if necessary
   if (oldFb) {
     free(oldFb);
