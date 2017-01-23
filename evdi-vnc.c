@@ -39,7 +39,6 @@ static const unsigned char EDID[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x39
 };
-#define N_BUFFERS 1
 // Currently the EVDI library won't update more than 16 rects at a time
 #define MAX_RECTS 16
 
@@ -49,9 +48,8 @@ int connectedClients = 0;
 rfbScreenInfoPtr screen;
 
 evdi_handle evdiNode;
-bool buffersAllocated = false;
-int nextBuffer = 0;
-evdi_buffer buffers[N_BUFFERS];
+bool bufferAllocated = false;
+evdi_buffer buffer;
 evdi_mode currentMode;
 evdi_rect rects[MAX_RECTS];
 
@@ -94,11 +92,8 @@ void adjustPixelFormat(rfbScreenInfoPtr screen) {
 /* Register a VNC frame buffer sized for the current mode
  */
 char * allocateVncFramebuffer(rfbScreenInfoPtr screen) {
-  int fbSize = currentMode.width * currentMode.height * currentMode.bits_per_pixel/8;
-  char *fb = (char*) malloc(fbSize);
-  // Set the inital FB to all white.
-  memset(fb, 0xff, fbSize);
-  return fb;
+  // Use the EVDI buffer
+  return buffer.buffer;
 }
 
 /* Do initial VNC setup and start the server. 
@@ -145,48 +140,35 @@ void modeChangedHandler(evdi_mode mode, void *userData) {
   }
   currentMode = mode;
 
-  // Unregister old EVDI buffers if necessary
-  if (buffersAllocated) {
-    for (int i = 0; i < N_BUFFERS; i++) {
-      free(buffers[i].buffer);
-      evdi_unregister_buffer(evdiNode, buffers[i].id);
-    }
+  // Unregister old EVDI buffer if necessary
+  if (bufferAllocated) {
+    free(buffer.buffer);
+    evdi_unregister_buffer(evdiNode, buffer.id);
   }
-  // Register new EVDI buffers for this mode
-  for (int i = 0; i < N_BUFFERS; i++) {
-    buffers[i].id = i;
-    buffers[i].width = mode.width;
-    buffers[i].height = mode.height;
-    buffers[i].stride = mode.bits_per_pixel/8 * mode.width;
-    buffers[i].buffer = malloc(buffers[i].height * buffers[i].stride);
-    evdi_register_buffer(evdiNode, buffers[i]);
-  }
-  buffersAllocated = true;
+  // Register new EVDI buffer for this mode
+  buffer.id = 0;
+  buffer.width = mode.width;
+  buffer.height = mode.height;
+  buffer.stride = mode.bits_per_pixel/8 * mode.width;
+  buffer.buffer = malloc(buffer.height * buffer.stride);
+  evdi_register_buffer(evdiNode, buffer);
+  bufferAllocated = true;
 
   // Register new VNC framebuffer
   if (screen == 0) return; // Exit early if VNC hasn't been started yet
-  char *oldFb = screen->frameBuffer;
   char *newFb = allocateVncFramebuffer(screen);
   rfbNewFramebuffer(screen, newFb, currentMode.width, currentMode.height, 8, 3,
       currentMode.bits_per_pixel/8);
   // Update pixel format
   adjustPixelFormat(screen);
-  // Unregister old VNC framebuffer if necessary
-  if (oldFb) {
-    free(oldFb);
-  }
 }
 
 void updateReadyHandler(int bufferId, void *userData) {
   int nRects;
   evdi_grab_pixels(evdiNode, rects, &nRects);
 
-  // Actually copy the data from one buffer to another
   for (int i = 0; i < nRects; i++) {
     for (int y = rects[i].y1; y <= rects[i].y2; y++) {
-      int start = buffers[bufferId].stride * y + 4 * rects[i].x1;
-      memcpy(&screen->frameBuffer[start], &buffers[bufferId].buffer[start],
-          4 * (rects[i].x2 - rects[i].x1));
       rfbMarkRectAsModified(screen, rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
     }
   }
@@ -324,11 +306,10 @@ int main(int argc, char *argv[]) {
   // Run event loop
   fprintf(stdout, "Starting event loop.\n");
   while (rfbIsActive(screen)) {
-    // Request an update
-    if (evdi_request_update(evdiNode, buffers[nextBuffer].id)) {
-      updateReadyHandler(buffers[nextBuffer].id, NULL);
+    // Request updates
+    while (evdi_request_update(evdiNode, buffer.id)) {
+      updateReadyHandler(buffer.id, NULL);
     }
-    nextBuffer = nextBuffer + 1 % N_BUFFERS;
     // Poll for EVDI updates for 1.0ms
     if (poll(pollfds, 1, 1)) {
       // Figure out which update we received
