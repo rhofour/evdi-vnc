@@ -47,6 +47,9 @@ static const unsigned char EDID[] = {
 // *** Structs ***
 struct sharedState {
   evdi_mode currentMode;
+  evdi_buffer buffer;
+  bool bufferAllocated;
+
   rfbScreenInfoPtr screen;
 };
 // *** Globals ***
@@ -54,8 +57,6 @@ struct sharedState {
 rfbScreenInfoPtr gScreen;
 
 evdi_handle gEvdiNode;
-bool gBufferAllocated = false;
-evdi_buffer gBuffer;
 
 // *** Signal Handler ***
 void handleSignal(int signal) {
@@ -88,8 +89,9 @@ void adjustPixelFormat(rfbScreenInfoPtr screen) {
 /* Register a VNC frame buffer sized for the current mode
  */
 char * allocateVncFramebuffer(rfbScreenInfoPtr screen) {
+  struct sharedState *state = (struct sharedState*)screen->screenData;
   // Use the EVDI buffer
-  return gBuffer.buffer;
+  return state->buffer.buffer;
 }
 
 /* Do initial VNC setup and start the server. 
@@ -138,18 +140,18 @@ void modeChangedHandler(evdi_mode mode, void *userData) {
   state->currentMode = mode;
 
   // Unregister old EVDI buffer if necessary
-  if (gBufferAllocated) {
-    free(gBuffer.buffer);
-    evdi_unregister_buffer(gEvdiNode, gBuffer.id);
+  if (state->bufferAllocated) {
+    free(state->buffer.buffer);
+    evdi_unregister_buffer(gEvdiNode, state->buffer.id);
   }
   // Register new EVDI buffer for this mode
-  gBuffer.id = 0;
-  gBuffer.width = mode.width;
-  gBuffer.height = mode.height;
-  gBuffer.stride = mode.bits_per_pixel/8 * mode.width;
-  gBuffer.buffer = malloc((unsigned int)gBuffer.height * (unsigned int)gBuffer.stride);
-  evdi_register_buffer(gEvdiNode, gBuffer);
-  gBufferAllocated = true;
+  state->buffer.id = 0;
+  state->buffer.width = mode.width;
+  state->buffer.height = mode.height;
+  state->buffer.stride = mode.bits_per_pixel/8 * mode.width;
+  state->buffer.buffer = malloc((unsigned int)state->buffer.height * (unsigned int)state->buffer.stride);
+  evdi_register_buffer(gEvdiNode, state->buffer);
+  state->bufferAllocated = true;
 
   // Register new VNC framebuffer
   if (gScreen == 0) return; // Exit early if VNC hasn't been started yet
@@ -265,7 +267,10 @@ void disconnectFromEvdiNode(evdi_handle nodeHandle) {
 
 int main(int argc, char *argv[]) {
 
+  // Initialize shared state
   struct sharedState state;
+  state.bufferAllocated = false;
+
   // Setup EVDI
   gEvdiNode = openEvdiNode();
   if (gEvdiNode == EVDI_INVALID_HANDLE) {
@@ -298,6 +303,7 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Failed to start VNC server.\n");
     return 1;
   }
+  state.screen->screenData = &state;
 
   // Catch Ctrl-C (SIGINT)
   gScreen = state.screen;
@@ -311,8 +317,8 @@ int main(int argc, char *argv[]) {
   fprintf(stdout, "Starting event loop.\n");
   while (rfbIsActive(gScreen)) {
     // Request updates
-    while (evdi_request_update(gEvdiNode, gBuffer.id)) {
-      updateReadyHandler(gBuffer.id, &state);
+    while (evdi_request_update(gEvdiNode, state.buffer.id)) {
+      updateReadyHandler(state.buffer.id, &state);
     }
     // Poll for EVDI updates for 1.0ms
     if (poll(pollfds, 1, 1)) {
