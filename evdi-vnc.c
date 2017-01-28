@@ -44,15 +44,18 @@ static const unsigned char EDID[] = {
 // Currently the EVDI library won't update more than 16 rects at a time
 #define MAX_RECTS 16
 
+// *** Structs ***
+struct sharedState {
+  evdi_mode currentMode;
+  rfbScreenInfoPtr screen;
+};
 // *** Globals ***
 
-int gConnectedClients = 0;
 rfbScreenInfoPtr gScreen;
 
 evdi_handle gEvdiNode;
 bool gBufferAllocated = false;
 evdi_buffer gBuffer;
-evdi_mode gCurrentMode;
 
 // *** Signal Handler ***
 void handleSignal(int signal) {
@@ -63,16 +66,8 @@ void handleSignal(int signal) {
 }
 
 // *** VNC Hooks ***
-static void clientGone(rfbClientPtr cl)
-{
-  cl->clientData = NULL;
-  gConnectedClients--;
-}
-
 static enum rfbNewClientAction newClient(rfbClientPtr client)
 {
-  client->clientGoneHook = clientGone;
-  gConnectedClients++;
   return RFB_CLIENT_ACCEPT;
 }
 
@@ -100,9 +95,9 @@ char * allocateVncFramebuffer(rfbScreenInfoPtr screen) {
 /* Do initial VNC setup and start the server. 
  * Returns the rfbScreenInfoPtr created.
  */
-rfbScreenInfoPtr startVncServer(int argc, char *argv[]) {
-  rfbScreenInfoPtr screen = rfbGetScreen(&argc, argv, gCurrentMode.width,
-      gCurrentMode.height, 8, 3, gCurrentMode.bits_per_pixel/8);
+rfbScreenInfoPtr startVncServer(int argc, char *argv[], struct sharedState *state) {
+  rfbScreenInfoPtr screen = rfbGetScreen(&argc, argv, state->currentMode.width,
+      state->currentMode.height, 8, 3, state->currentMode.bits_per_pixel/8);
   if (screen == 0) {
     fprintf(stderr, "Error getting RFB screen.\n");
     return screen;
@@ -132,6 +127,7 @@ void dpmsHandler(int dpmsMode, void *userData) {
 
 void modeChangedHandler(evdi_mode mode, void *userData) {
   fprintf(stdout, "Mode changed to %dx%d @ %dHz\n", mode.width, mode.height, mode.refresh_rate);
+  struct sharedState *state = (struct sharedState*)userData;
   if (mode.bits_per_pixel != 32) {
     // TODO: properly communicate between Linux DRM buffer formats and
     // libvncserver
@@ -139,7 +135,7 @@ void modeChangedHandler(evdi_mode mode, void *userData) {
         mode.bits_per_pixel);
     exit(1);
   }
-  gCurrentMode = mode;
+  state->currentMode = mode;
 
   // Unregister old EVDI buffer if necessary
   if (gBufferAllocated) {
@@ -158,8 +154,8 @@ void modeChangedHandler(evdi_mode mode, void *userData) {
   // Register new VNC framebuffer
   if (gScreen == 0) return; // Exit early if VNC hasn't been started yet
   char *newFb = allocateVncFramebuffer(gScreen);
-  rfbNewFramebuffer(gScreen, newFb, gCurrentMode.width, gCurrentMode.height, 8, 3,
-      gCurrentMode.bits_per_pixel/8);
+  rfbNewFramebuffer(gScreen, newFb, state->currentMode.width, state->currentMode.height, 8, 3,
+      state->currentMode.bits_per_pixel/8);
   // Update pixel format
   adjustPixelFormat(gScreen);
 }
@@ -168,10 +164,11 @@ void updateReadyHandler(int bufferId, void *userData) {
   int nRects;
   evdi_rect rects[MAX_RECTS];
   evdi_grab_pixels(gEvdiNode, rects, &nRects);
+  struct sharedState *state = (struct sharedState*)userData;
 
   for (int i = 0; i < nRects; i++) {
     for (int y = rects[i].y1; y <= rects[i].y2; y++) {
-      rfbMarkRectAsModified(gScreen, rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
+      rfbMarkRectAsModified(state->screen, rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
     }
   }
 }
@@ -268,6 +265,7 @@ void disconnectFromEvdiNode(evdi_handle nodeHandle) {
 
 int main(int argc, char *argv[]) {
 
+  struct sharedState state;
   // Setup EVDI
   gEvdiNode = openEvdiNode();
   if (gEvdiNode == EVDI_INVALID_HANDLE) {
@@ -283,10 +281,11 @@ int main(int argc, char *argv[]) {
   evdiCtx.mode_changed_handler = modeChangedHandler;
   evdiCtx.update_ready_handler = updateReadyHandler;
   evdiCtx.crtc_state_handler = crtcStateHandler;
+  evdiCtx.user_data = &state;
   
   // Connect to gEvdiNode and wait for mode to update
   connectToEvdiNode(gEvdiNode);
-  while (gCurrentMode.width == 0) {
+  while (state.currentMode.width == 0) {
     if (poll(pollfds, 1, -1)) {
       // Figure out which update we received
       evdi_handle_events(gEvdiNode, &evdiCtx);
@@ -294,13 +293,14 @@ int main(int argc, char *argv[]) {
   }
 
   // Start up VNC server
-  gScreen = startVncServer(argc, argv);
-  if (gScreen == 0) {
+  state.screen = startVncServer(argc, argv, &state);
+  if (state.screen == 0) {
     fprintf(stderr, "Failed to start VNC server.\n");
     return 1;
   }
 
   // Catch Ctrl-C (SIGINT)
+  gScreen = state.screen;
   struct sigaction sa;
   sa.sa_handler = handleSignal;
   sigemptyset(&sa.sa_mask);
@@ -312,7 +312,7 @@ int main(int argc, char *argv[]) {
   while (rfbIsActive(gScreen)) {
     // Request updates
     while (evdi_request_update(gEvdiNode, gBuffer.id)) {
-      updateReadyHandler(gBuffer.id, NULL);
+      updateReadyHandler(gBuffer.id, &state);
     }
     // Poll for EVDI updates for 1.0ms
     if (poll(pollfds, 1, 1)) {
@@ -320,7 +320,7 @@ int main(int argc, char *argv[]) {
       evdi_handle_events(gEvdiNode, &evdiCtx);
     }
     // Check for VNC events for remaining time to match refresh rate
-    int timeoutMicros = (int)((double)1e6 / gCurrentMode.refresh_rate) - 1000;
+    int timeoutMicros = (int)((double)1e6 / state.currentMode.refresh_rate) - 1000;
     rfbProcessEvents(gScreen, timeoutMicros);
   }
 
