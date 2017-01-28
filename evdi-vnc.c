@@ -253,7 +253,7 @@ evdi_handle openEvdiNode() {
  */
 void connectToEvdiNode(evdi_handle nodeHandle) {
   fprintf(stdout, "Sent EDID of size: %lu\t%s\n", sizeof(EDID), EDID);
-  evdi_connect(nodeHandle, EDID, sizeof(EDID), NULL, 0);
+  evdi_connect(nodeHandle, EDID, sizeof(EDID));
   fprintf(stdout, "Connected to EVDI node.\n");
 }
 
